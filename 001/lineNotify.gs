@@ -63,22 +63,22 @@ function handleEvent(event) {
 }
 
 function processWithAI(text, replyToken) {
-
   if (!GEMINI_API_KEY) {
     replyLine(replyToken, "⚠️ 系統未設定 AI 金鑰，請聯繫管理員。");
     return;
   }
 
-  var aiResponse = callGeminiAPI(replyToken,text);
+  var aiResponse = callGeminiAPI(replyToken, text);
   Logger.log('AI Response: ' + JSON.stringify(aiResponse));
   
   if (!aiResponse || aiResponse.length === 0) {
-    replyLine(replyToken, "🤖 抱歉，我聽不懂您的意思。請嘗試更具體的說法，例如：『幫我新增...』或『查詢...』。" + JSON.stringify(aiResponse));
-    return;
+    // 如果 AI 完全沒回傳或格式錯誤
+    return; 
   }
 
   var finalMsg = "";
   var calendar = CalendarApp.getCalendarById(CALENDAR_ID);
+  var needsMonthlySummary = false;
 
   aiResponse.forEach(function(item) {
     try {
@@ -88,6 +88,7 @@ function processWithAI(text, replyToken) {
           var end = new Date(item.end);
           calendar.createEvent(item.title, start, end);
           finalMsg += "✅ 已新增：" + item.title + "\n📅 " + formatDate(start) + " " + formatTime(start) + "\n\n";
+          needsMonthlySummary = true;
           break;
           
         case 'QUERY':
@@ -106,7 +107,6 @@ function processWithAI(text, replyToken) {
           break;
 
         case 'UPDATE':
-          // 智慧修改：先根據舊日期或今天/明天/後天的範圍找行程
           var targetDate = new Date(item.old_start || item.start);
           var searchStart = new Date(targetDate);
           searchStart.setHours(0,0,0);
@@ -116,7 +116,6 @@ function processWithAI(text, replyToken) {
           var foundEvents = calendar.getEvents(searchStart, searchEnd);
           var updated = false;
           
-          // 如果有給關鍵字就過濾關鍵字，否則取該日第一筆
           foundEvents.forEach(function(e) {
             if (!updated && (!item.old_title || e.getTitle().indexOf(item.old_title) !== -1)) {
               var oldTitle = e.getTitle();
@@ -149,8 +148,16 @@ function processWithAI(text, replyToken) {
           if (!deleted) finalMsg += "⚠️ 找不到要取消的行程（" + formatDate(dDate) + "）。\n\n";
           break;
 
+        case 'HINT':
+          finalMsg += "💡 格式提示：" + item.reason + "\n正確格式為：[人名] [日期時間] [課程內容]\n例如：小明 2026/03/15 14:00 鋼琴課\n\n";
+          break;
+
+        case 'IGNORE':
+          // 與報名無關，不予回應
+          break;
+
         default:
-          finalMsg += "🤖 收到指令：" + item.action + "，但目前尚不支援此操作。\n\n";
+          Logger.log('未知行動：' + item.action);
       }
     } catch (e) {
       finalMsg += "❌ 執行失敗：" + (item.title || item.action) + " (" + e.toString() + ")\n\n";
@@ -158,33 +165,70 @@ function processWithAI(text, replyToken) {
     }
   });
 
-replyLine(replyToken, finalMsg.trim());
+  if (needsMonthlySummary) {
+    finalMsg += getMonthlySummary();
+  }
 
-  if (finalMsg) {
+  if (finalMsg.trim()) {
     replyLine(replyToken, finalMsg.trim());
   }
 }
 
+/**
+ * 取得當月報名總覽
+ */
+function getMonthlySummary() {
+  var now = new Date();
+  var startOfMonth = new Date(now.getFullYear(), now.getMonth(), 1);
+  var endOfMonth = new Date(now.getFullYear(), now.getMonth() + 1, 0, 23, 59, 59);
+  
+  var calendar = CalendarApp.getCalendarById(CALENDAR_ID);
+  var events = calendar.getEvents(startOfMonth, endOfMonth);
+  
+  var summary = "📊 " + (now.getMonth() + 1) + " 月報名總覽：\n";
+  if (events.length === 0) {
+    summary += "目前尚無報名紀錄。";
+  } else {
+    // 依時間排序
+    events.sort(function(a, b) {
+      return a.getStartTime() - b.getStartTime();
+    });
+    events.forEach(function(e) {
+      summary += "• " + formatDate(e.getStartTime()) + " " + formatTime(e.getStartTime()) + " " + e.getTitle() + "\n";
+    });
+  }
+  return summary;
+}
+
 function callGeminiAPI(replyToken, text) {
-var now = new Date();
+  var now = new Date();
   var todayStr = formatDate(now);
   var dayOfWeek = ["日", "一", "二", "三", "四", "五", "六"][now.getDay()];
   
-  var prompt = "你是一個專業的行程秘書。請解析使用者輸入並判斷意圖。使用者訊息可能包含多行，代表多個動作，請全部解析。\n\n" +
-    "目前的今天是 " + todayStr + " (星期" + dayOfWeek + ")。\n" +
-    "請精確換算日期：明天是 " + formatDate(new Date(now.getTime() + 86400000)) + "，後天是 " + formatDate(new Date(now.getTime() + 86400000 * 2)) + "。\n\n" +
+  var prompt = "你是一個專業的課程報名秘書。請解析使用者輸入並判斷其意圖。\n\n" +
+    "目前的今天是 " + todayStr + " (星期" + dayOfWeek + ")。\n\n" +
+    "【規則】\n" +
+    "1. 如果使用者想要「報名課程」或「新增行程」，其輸入必須符合格式：『[人名] [日期時間] [課程內容]』。\n" +
+    "   - 範例：『小明 2026/03/15 14:00 鋼琴課』。\n" +
+    "   - 報名時的 title 請統一格式為『[人名][課程]』(例如：小明鋼琴課)。\n" +
+    "2. 如果要「刪除/取消」報名，必須包含『人名』與『課程』(例如：取消小明的鋼琴課)。\n" +
+    "   - 刪除時的 title 必須與報名時的『[人名][課程]』一致。\n" +
+    "3. 「查詢」功能必須列出所選期間內「所有學生」的報名課程，而不僅限於某一人。\n" +
+    "4. 如果使用者的訊息跟報名、查詢、修改、刪除完全無關，請回傳 ACTION: 'IGNORE'。\n" +
+    "5. 若報名格式不正確，請回傳 ACTION: 'HINT' 並說明缺少的資訊。\n\n" +
+    "【輸出格式】\n" +
     "請嚴格回傳一個 JSON 陣列，每個元素代表一個動作：\n" +
-    "- 新增 (ADD)：需包含 title, start, end (ISO格式)。例：{ \"action\": \"ADD\", \"title\": \"標題\", \"start\": \"...\", \"end\": \"...\" }\n" +
-    "- 查詢 (QUERY)：需包含 title (範圍描述), start, end (範圍ISO)。\n" +
-    "- 修改 (UPDATE)：需包含 old_title (關鍵字,可空), old_start (原本日期ISO), start (新開始ISO), end (新結束ISO), new_title (可選)。\n" +
-    "- 刪除 (DELETE)：需包含 title (關鍵字,可空), start (目標日期ISO以利搜尋)。\n\n" +
-    "注意：\n" +
-    "1. 預設上課時間為 1 小時。\n" +
-    "2. 使用者說「後天的課改成...」代表 old_start 是後天，start 是新時間。\n" +
-    "3. 確保回傳結果是一個合法的 JSON 陣列，不要有額外文字。\n\n" +
-    "內容：\"" + text + "\"";
+    "- ADD (新增)：需包含 title (人名課程), start, end (ISO格式)。\n" +
+    "- QUERY (查詢)：需包含 title (範圍描述), start, end (範圍ISO)。\n" +
+    "- UPDATE (修改)：需包含 old_title, old_start, start, end, new_title。\n" +
+    "- DELETE (刪除)：需包含 title (必須是[人名][課程]), start (目標日期)。\n" +
+    "- HINT (提示)：格式錯誤時使用。需包含 reason (字串)。\n" +
+    "- IGNORE (忽略)：無關對話時使用。\n\n" +
+    "確保回傳結果是一個合法的 JSON 陣列，不要有任何額外文字敘述。\n\n" +
+    "使用者內容：\"" + text + "\"";
 
-  // var url = 'https://generativelanguage.googleapis.com/v1beta/models/gemini-2.0-flash:generateContent?key=' + GEMINI_API_KEY;
+  // 使用 gemini-1.5-flash 模型
+  // var url = 'https://generativelanguage.googleapis.com/v1beta/models/gemini-1.5-flash:generateContent?key=' + GEMINI_API_KEY;
   // 使用 gemma-2-9b-it 模型
   var url = 'https://generativelanguage.googleapis.com/v1beta/models/gemma-3n-e2b-it:generateContent?key=' + GEMINI_API_KEY;
   var payload = { 'contents': [{ 'parts': [{ 'text': prompt }] }] };
@@ -194,14 +238,13 @@ var now = new Date();
     var response = UrlFetchApp.fetch(url, options);
     var responseText = response.getContentText();
     Logger.log('Gemini API Response: ' + responseText);
-    // replyLine(replyToken, 'Gemini API Response: ' + responseText);
     
     var json = JSON.parse(responseText);
     
     if (json.error) {
       Logger.log('Gemini API Error details: ' + JSON.stringify(json.error));
-      replyLine(replyToken, 'Gemini API Error details:' + JSON.stringify(json.error));
-      
+      // 若有必要可取消註解下面這行進行除錯
+      // replyLine(replyToken, 'Gemini API Error details:' + JSON.stringify(json.error));
       return null;
     }
 
@@ -220,7 +263,6 @@ var now = new Date();
     Logger.log('Gemini fetch Error: ' + e.toString());
   }
   
-  replyLine(replyToken, 'Gemini API Error22');
   return null;
 }
 
