@@ -329,6 +329,63 @@ function pushMessage(userId, text) {
   });
 }
 
+/**
+ * 檢查是否為該月的最後一週（最後 7 天）
+ */
+function isLastWeekOfMonth() {
+  var now = new Date();
+  var today = now.getDate();
+  var lastDayOfMonth = new Date(now.getFullYear(), now.getMonth() + 1, 0).getDate();
+  
+  // 如果今天日期距離月底小於等於 7 天，則視為最後一週
+  return (lastDayOfMonth - today) < 7;
+}
+
+/**
+ * 每日 12:00 定時發送當月報名總覽
+ */
+function sendDailyMonthlySummary() {
+  // 月底最後一週不通知
+  if (isLastWeekOfMonth()) {
+    Logger.log('ℹ️ 目前為月底最後一週，跳過自動通知。');
+    return;
+  }
+  
+  var summary = getMonthlySummary();
+  var userId = PropertiesService.getScriptProperties().getProperty(USER_ID_STORE);
+  
+  if (userId) {
+    pushMessage(userId, "🔔 每日課程提醒\n\n" + summary);
+    Logger.log('✅ 每日通知已發送至：' + userId);
+  } else {
+    Logger.log('⚠️ 找不到推送對象 (userId)，無法發送通知。');
+  }
+}
+
+/**
+ * 建立每日 12:00 的觸發器
+ * 請在 GAS 編輯器中手動執行此函式一次即可完成設定
+ */
+function createDailyTrigger() {
+  // 先刪除舊的同名觸發器，避免重複
+  var triggers = ScriptApp.getProjectTriggers();
+  triggers.forEach(function(trigger) {
+    if (trigger.getHandlerFunction() === 'sendDailyMonthlySummary') {
+      ScriptApp.deleteTrigger(trigger);
+    }
+  });
+  
+  // 建立新的每日觸發器，設定在早上 12:00 到 13:00 之間
+  ScriptApp.newTrigger('sendDailyMonthlySummary')
+    .timeBased()
+    .atHour(12)
+    .everyDays(1)
+    .inTimezone("GMT+8")
+    .create();
+    
+  Logger.log('✅ 已成功設定每日 12:00 的自動通知觸發器。');
+}
+
 function listModels() {
   var url = 'https://generativelanguage.googleapis.com/v1beta/models/gemini-flash-latest:generateContent?key=' + GEMINI_API_KEY;
   var response = UrlFetchApp.fetch(url, { 'muteHttpExceptions': true });
